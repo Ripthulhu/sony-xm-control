@@ -272,6 +272,7 @@ namespace Xm5ControlUi
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
+        private const int BackendCommandPaceMs = 450;
         private const string StateBatchCommand = "batch \"22 00;66 17;D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\" --timeout 1800";
 
         private readonly string backendPath;
@@ -279,6 +280,7 @@ namespace Xm5ControlUi
         private readonly ShortcutAction[] shortcutActions;
         private readonly Dictionary<string, ShortcutBinding> shortcutBindings = new Dictionary<string, ShortcutBinding>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<int, ShortcutAction> registeredShortcuts = new Dictionary<int, ShortcutAction>();
+        private readonly Dictionary<int, int[]> eqBandCache = new Dictionary<int, int[]>();
         private readonly NotifyIcon trayIcon;
         private readonly ContextMenuStrip trayMenu;
         private readonly Icon windowIcon;
@@ -298,6 +300,7 @@ namespace Xm5ControlUi
         private bool commandBusy;
         private bool autoDetectRunning;
         private bool lastStateRefreshConnected;
+        private DateTime lastBackendCommandAtUtc = DateTime.MinValue;
 
         private Label titleLabel;
         private Label statusLabel;
@@ -308,7 +311,6 @@ namespace Xm5ControlUi
         private Label bigModeLabel;
         private Label bigDetailLabel;
         private Label levelLabel;
-        private Label equalizerLabel;
         private Label eqCardSummaryLabel;
         private Label dseeLabel;
         private Label connectionQualityLabel;
@@ -316,6 +318,9 @@ namespace Xm5ControlUi
         private Label wearPauseLabel;
         private Label touchPanelLabel;
         private Label autoPowerLabel;
+        private Label shortcutsCaptionLabel;
+        private Label shortcutsDescriptionLabel;
+        private Panel shortcutsDivider;
         private PillButton multipointOnButton;
         private PillButton multipointOffButton;
         private PillButton soundQualityButton;
@@ -345,6 +350,7 @@ namespace Xm5ControlUi
         private bool updatingEqUi;
         private bool liveEqSendRunning;
         private bool liveEqSendPending;
+        private int eqFetchGeneration;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr hIcon);
@@ -812,23 +818,22 @@ namespace Xm5ControlUi
                 new EqPresetChoice("User 2", 0xA2)
             });
             eqPresetBox.SelectedIndex = 9;
-            eqPresetBox.SelectedIndexChanged += (s, e) =>
+            eqPresetBox.SelectedIndexChanged += async (s, e) =>
             {
                 if (updatingEqUi) return;
                 var choice = eqPresetBox.SelectedItem as EqPresetChoice;
                 if (choice == null) return;
-                currentEqPreset = choice.Value;
-                int[] values = CurrentEqValues();
-                if (eqCurve != null) eqCurve.SetState(currentEqPreset, values);
-                if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(currentEqPreset, values);
-                lastActionLabel.Text = "Equalizer preset updating";
-                ScheduleLiveEqualizerApply();
+                await RunUiTaskAsync(() => SendEqualizerPresetAsync(choice.Value));
             };
             parent.Controls.Add(eqPresetBox);
 
             var flat = new PillButton("Flat", Color.FromArgb(65, 70, 78), Color.FromArgb(77, 83, 92));
             flat.Click += async (s, e) => await SetEqualizerFlatAsync();
             parent.Controls.Add(flat);
+
+            var savePreset = new PillButton("Save preset", blue, bluePressed);
+            savePreset.Click += (s, e) => ShowEqualizerSaveMenu(savePreset);
+            parent.Controls.Add(savePreset);
 
             eqSliders = new SliderControl[6];
             eqValueLabels = new Label[6];
@@ -872,25 +877,7 @@ namespace Xm5ControlUi
                     TickColor = Color.FromArgb(91, 98, 108),
                     CenteredFill = true
                 };
-                slider.ValueChanged += (s, e) =>
-                {
-                    var changed = (SliderControl)s;
-                    int index = Array.IndexOf(eqSliders, changed);
-                    if (!updatingEqUi)
-                    {
-                        currentEqPreset = 0xA0;
-                        SelectEqPreset(0xA0);
-                    }
-                    if (index >= 0) eqValueLabels[index].Text = FormatEqValue(changed.Value);
-                    int[] values = CurrentEqValues();
-                    if (eqCurve != null) eqCurve.SetState(currentEqPreset, values);
-                    if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(currentEqPreset, values);
-                    if (!updatingEqUi)
-                    {
-                        lastActionLabel.Text = "Equalizer updating";
-                        ScheduleLiveEqualizerApply();
-                    }
-                };
+                slider.ValueChanged += (s, e) => HandleEqualizerSliderChanged((SliderControl)s);
                 parent.Controls.Add(slider);
                 eqSliders[i] = slider;
             }
@@ -899,11 +886,13 @@ namespace Xm5ControlUi
             {
                 flat.Size = new Size(74, 34);
                 flat.Location = new Point(parent.Width - flat.Width - CardInset, 184);
+                savePreset.Size = new Size(116, 34);
+                savePreset.Location = new Point(flat.Left - savePreset.Width - 10, 184);
                 eqCardSummaryLabel.Width = Math.Max(260, parent.Width - (CardInset * 2));
                 eqCurve.Width = Math.Max(360, parent.Width - (CardInset * 2));
                 eqCurve.Height = 112;
                 eqPresetBox.Location = new Point(CardInset, 184);
-                eqPresetBox.Width = Math.Max(150, Math.Min(220, flat.Left - CardInset - 12));
+                eqPresetBox.Width = Math.Max(150, Math.Min(220, savePreset.Left - CardInset - 12));
 
                 int top = 222;
                 int rowHeight = 33;
@@ -935,70 +924,87 @@ namespace Xm5ControlUi
         private void BuildSettingsHub(CardPanel parent)
         {
             AddTitle(parent, "Settings", 24);
-            configureShortcutsButton = NewOptionButton("Shortcuts");
-            configureShortcutsButton.Click += (s, e) => ConfigureShortcuts();
-            parent.Controls.Add(configureShortcutsButton);
-            UpdateShortcutsLabel();
-            Action placeShortcutsButton = () =>
-            {
-                configureShortcutsButton.Size = new Size(configureShortcutsButton.Text.Length > 11 ? 126 : 108, 32);
-                configureShortcutsButton.Location = new Point(parent.Width - configureShortcutsButton.Width - CardInset, 21);
-            };
-            parent.Resize += (s, e) => placeShortcutsButton();
-            placeShortcutsButton();
 
             AddEyebrow(parent, "Device", 62);
             connectionLabel = AddActionRow(parent, "Connection", "Waiting", 84);
             batteryLabel = AddActionRow(parent, "Battery", "Waiting", 128);
-            multipointOnButton = NewOptionButton("On");
-            multipointOffButton = NewOptionButton("Off");
-            multipointLabel = AddActionRow(parent, "Connect to 2 devices", "Waiting", 172, multipointOnButton, multipointOffButton);
-            multipointOnButton.Click += async (s, e) => await SetMultipointAsync(true);
-            multipointOffButton.Click += async (s, e) => await SetMultipointAsync(false);
-
-            soundQualityButton = NewOptionButton("Sound quality");
-            stableButton = NewOptionButton("Stable");
-            connectionQualityLabel = AddActionRow(parent, "Bluetooth connection quality", "Waiting", 222, soundQualityButton, stableButton);
+            soundQualityButton = NewOptionButton("Quality");
+            stableButton = NewOptionButton("Stability");
+            connectionQualityLabel = AddActionRow(parent, "Bluetooth connection quality", "Waiting", 172, soundQualityButton, stableButton);
             soundQualityButton.Click += async (s, e) => await SetConnectionQualityAsync(true);
             stableButton.Click += async (s, e) => await SetConnectionQualityAsync(false);
 
+            multipointOnButton = NewOptionButton("On");
+            multipointOffButton = NewOptionButton("Off");
+            multipointLabel = AddActionRow(parent, "Multipoint support", "Waiting", 222, multipointOnButton, multipointOffButton);
+            multipointOnButton.Click += async (s, e) => await SetMultipointAsync(true);
+            multipointOffButton.Click += async (s, e) => await SetMultipointAsync(false);
+
             AddDivider(parent, 278);
             AddEyebrow(parent, "Sound", 300);
-            equalizerLabel = AddActionRow(parent, "Equalizer", "Waiting", 322);
 
             dseeAutoButton = NewOptionButton("Auto");
             dseeOffButton = NewOptionButton("Off");
-            dseeLabel = AddActionRow(parent, "DSEE Extreme", "Waiting", 370, dseeAutoButton, dseeOffButton);
+            dseeLabel = AddActionRow(parent, "DSEE Extreme", "Waiting", 322, dseeAutoButton, dseeOffButton);
             dseeAutoButton.Click += async (s, e) => await SetDseeAsync(true);
             dseeOffButton.Click += async (s, e) => await SetDseeAsync(false);
 
-            AddDivider(parent, 426);
-            AddEyebrow(parent, "Controls", 448);
+            AddDivider(parent, 378);
+            AddEyebrow(parent, "Controls", 400);
             speakOnButton = NewOptionButton("On");
             speakOffButton = NewOptionButton("Off");
-            speakToChatLabel = AddActionRow(parent, "Speak-to-Chat", "Waiting", 470, speakOnButton, speakOffButton);
+            speakToChatLabel = AddActionRow(parent, "Speak-to-Chat", "Waiting", 422, speakOnButton, speakOffButton);
             speakOnButton.Click += async (s, e) => await SetSpeakToChatAsync(true);
             speakOffButton.Click += async (s, e) => await SetSpeakToChatAsync(false);
 
             pauseOnButton = NewOptionButton("On");
             pauseOffButton = NewOptionButton("Off");
-            wearPauseLabel = AddActionRow(parent, "Pause when headphones are removed", "Waiting", 518, pauseOnButton, pauseOffButton);
+            wearPauseLabel = AddActionRow(parent, "Pause when headphones are removed", "Waiting", 470, pauseOnButton, pauseOffButton);
             pauseOnButton.Click += async (s, e) => await SetWearPauseAsync(true);
             pauseOffButton.Click += async (s, e) => await SetWearPauseAsync(false);
 
             touchOnButton = NewOptionButton("On");
             touchOffButton = NewOptionButton("Off");
-            touchPanelLabel = AddActionRow(parent, "Touch sensor control panel", "Waiting", 566, touchOnButton, touchOffButton);
+            touchPanelLabel = AddActionRow(parent, "Touch sensor control panel", "Waiting", 518, touchOnButton, touchOffButton);
             touchOnButton.Click += async (s, e) => await SetTouchPanelAsync(true);
             touchOffButton.Click += async (s, e) => await SetTouchPanelAsync(false);
 
-            AddDivider(parent, 622);
-            AddEyebrow(parent, "Power", 644);
-            autoPowerRemovedButton = NewOptionButton("When Removed");
-            autoPowerDisableButton = NewOptionButton("Disable");
-            autoPowerLabel = AddActionRow(parent, "Automatic power off", "Waiting", 666, autoPowerRemovedButton, autoPowerDisableButton);
+            AddDivider(parent, 574);
+            AddEyebrow(parent, "Power", 596);
+            autoPowerRemovedButton = NewOptionButton("On");
+            autoPowerDisableButton = NewOptionButton("Off");
+            autoPowerLabel = AddActionRow(parent, "Automatic power off", "Waiting", 618, autoPowerRemovedButton, autoPowerDisableButton);
             autoPowerRemovedButton.Click += async (s, e) => await SetAutoPowerRemovedAsync();
             autoPowerDisableButton.Click += async (s, e) => await SetAutoPowerDisabledAsync();
+
+            shortcutsDivider = new Panel
+            {
+                BackColor = line,
+                Height = 1
+            };
+            parent.Controls.Add(shortcutsDivider);
+            shortcutsCaptionLabel = new Label
+            {
+                Text = "Keyboard shortcuts",
+                ForeColor = ink,
+                Font = new Font("Segoe UI Semibold", 10f),
+                AutoEllipsis = true
+            };
+            parent.Controls.Add(shortcutsCaptionLabel);
+            shortcutsDescriptionLabel = new Label
+            {
+                Text = "Configure app shortcuts",
+                ForeColor = subdued,
+                Font = new Font("Segoe UI", 9.2f),
+                AutoEllipsis = true
+            };
+            parent.Controls.Add(shortcutsDescriptionLabel);
+            configureShortcutsButton = NewOptionButton("Shortcuts");
+            configureShortcutsButton.Click += (s, e) => ConfigureShortcuts();
+            parent.Controls.Add(configureShortcutsButton);
+            parent.Resize += (s, e) => LayoutShortcutsRow(parent);
+            LayoutShortcutsRow(parent);
+            UpdateShortcutsLabel();
 
             SetModeButtonState("Ambient");
             SetMultipointState(null);
@@ -1014,6 +1020,36 @@ namespace Xm5ControlUi
         {
             var button = new PillButton(caption, InactiveButtonColor(), PressedColor(InactiveButtonColor()));
             return button;
+        }
+
+        private void LayoutShortcutsRow(Control parent)
+        {
+            if (parent == null) return;
+            int dividerTop = Math.Max(686, parent.Height - 126);
+            if (shortcutsDivider != null && !shortcutsDivider.IsDisposed)
+            {
+                shortcutsDivider.Location = new Point(CardInset, dividerTop);
+                shortcutsDivider.Width = Math.Max(80, parent.Width - (CardInset * 2));
+            }
+
+            int rowTop = dividerTop + 26;
+            int buttonWidth = configureShortcutsButton == null ? 108 : Math.Max(108, OptionButtonWidth(configureShortcutsButton));
+            int textWidth = Math.Max(140, parent.Width - buttonWidth - (CardInset * 2 + 16));
+            if (shortcutsCaptionLabel != null && !shortcutsCaptionLabel.IsDisposed)
+            {
+                shortcutsCaptionLabel.Location = new Point(CardInset, rowTop);
+                shortcutsCaptionLabel.Size = new Size(textWidth, 20);
+            }
+            if (shortcutsDescriptionLabel != null && !shortcutsDescriptionLabel.IsDisposed)
+            {
+                shortcutsDescriptionLabel.Location = new Point(CardInset, rowTop + 22);
+                shortcutsDescriptionLabel.Size = new Size(textWidth, 20);
+            }
+            if (configureShortcutsButton != null && !configureShortcutsButton.IsDisposed)
+            {
+                configureShortcutsButton.Size = new Size(buttonWidth, 32);
+                configureShortcutsButton.Location = new Point(parent.Width - buttonWidth - CardInset, rowTop + 8);
+            }
         }
 
         private void SetModeButtonState(string mode)
@@ -1034,7 +1070,7 @@ namespace Xm5ControlUi
 
         private void SetConnectionQualityState(bool? prioritizeSound)
         {
-            if (connectionQualityLabel != null) connectionQualityLabel.Text = prioritizeSound.HasValue ? (prioritizeSound.Value ? "Prioritize Sound Quality" : "Prioritize Stable Connection") : "Waiting";
+            if (connectionQualityLabel != null) connectionQualityLabel.Text = prioritizeSound.HasValue ? (prioritizeSound.Value ? "Quality" : "Stability") : "Waiting";
             SetOptionPair(soundQualityButton, stableButton, prioritizeSound, blue, blue);
         }
 
@@ -1068,8 +1104,8 @@ namespace Xm5ControlUi
             bool disabled = string.Equals(state, "disabled", StringComparison.OrdinalIgnoreCase);
             if (autoPowerLabel != null)
             {
-                if (removed) autoPowerLabel.Text = "Off when headphones are removed";
-                else if (disabled) autoPowerLabel.Text = "Disabled";
+                if (removed) autoPowerLabel.Text = "On";
+                else if (disabled) autoPowerLabel.Text = "Off";
                 else autoPowerLabel.Text = "Waiting";
             }
             SetButtonSelected(autoPowerRemovedButton, removed, blue);
@@ -1128,11 +1164,27 @@ namespace Xm5ControlUi
             AddTrayAction(menu.Items, "Noise cancelling", SetAncAsync);
             AddTrayAction(menu.Items, "Ambient sound: 12", () => SetAmbientAsync(12));
             AddTrayAction(menu.Items, "Ambient sound: 20", () => SetAmbientAsync(20));
-            AddTrayAction(menu.Items, "Noise control off", SetOffAsync);
+            AddTrayAction(menu.Items, "Noise control: Off", SetOffAsync);
             menu.Items.Add(new ToolStripSeparator());
-            AddTrayAction(menu.Items, "Reset equalizer to flat", SetEqualizerFlatAsync);
-            AddTrayAction(menu.Items, "Prioritize sound quality", () => SetConnectionQualityAsync(true));
-            AddTrayAction(menu.Items, "Prioritize stable connection", () => SetConnectionQualityAsync(false));
+            AddTrayAction(menu.Items, "Equalizer: Manual", () => SendEqualizerPresetAsync(0xA0));
+            AddTrayAction(menu.Items, "Equalizer: User 1", () => SendEqualizerPresetAsync(0xA1));
+            AddTrayAction(menu.Items, "Equalizer: User 2", () => SendEqualizerPresetAsync(0xA2));
+            AddTrayAction(menu.Items, "Equalizer: Flat", SetEqualizerFlatAsync);
+            AddTrayAction(menu.Items, "Bluetooth connection quality: Quality", () => SetConnectionQualityAsync(true));
+            AddTrayAction(menu.Items, "Bluetooth connection quality: Stability", () => SetConnectionQualityAsync(false));
+            AddTrayAction(menu.Items, "DSEE Extreme: Auto", () => SetDseeAsync(true));
+            AddTrayAction(menu.Items, "DSEE Extreme: Off", () => SetDseeAsync(false));
+            AddTrayAction(menu.Items, "Multipoint support: On", () => SetMultipointAsync(true));
+            AddTrayAction(menu.Items, "Multipoint support: Off", () => SetMultipointAsync(false));
+            menu.Items.Add(new ToolStripSeparator());
+            AddTrayAction(menu.Items, "Speak-to-Chat: On", () => SetSpeakToChatAsync(true));
+            AddTrayAction(menu.Items, "Speak-to-Chat: Off", () => SetSpeakToChatAsync(false));
+            AddTrayAction(menu.Items, "Pause when headphones are removed: On", () => SetWearPauseAsync(true));
+            AddTrayAction(menu.Items, "Pause when headphones are removed: Off", () => SetWearPauseAsync(false));
+            AddTrayAction(menu.Items, "Touch sensor control panel: On", () => SetTouchPanelAsync(true));
+            AddTrayAction(menu.Items, "Touch sensor control panel: Off", () => SetTouchPanelAsync(false));
+            AddTrayAction(menu.Items, "Automatic power off: On", SetAutoPowerRemovedAsync);
+            AddTrayAction(menu.Items, "Automatic power off: Off", SetAutoPowerDisabledAsync);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Configure shortcuts...", null, (s, e) => ConfigureShortcuts());
 
@@ -1180,12 +1232,25 @@ namespace Xm5ControlUi
                 new ShortcutAction("anc", "Noise cancelling"),
                 new ShortcutAction("ambient12", "Ambient sound: 12"),
                 new ShortcutAction("ambient20", "Ambient sound: 20"),
-                new ShortcutAction("off", "Noise control off"),
-                new ShortcutAction("eqflat", "Reset equalizer to flat"),
-                new ShortcutAction("soundquality", "Prioritize sound quality"),
-                new ShortcutAction("stable", "Prioritize stable connection"),
+                new ShortcutAction("off", "Noise control: Off"),
+                new ShortcutAction("eqmanual", "Equalizer: Manual"),
+                new ShortcutAction("equser1", "Equalizer: User 1"),
+                new ShortcutAction("equser2", "Equalizer: User 2"),
+                new ShortcutAction("eqflat", "Equalizer: Flat"),
+                new ShortcutAction("soundquality", "Bluetooth connection quality: Quality"),
+                new ShortcutAction("stable", "Bluetooth connection quality: Stability"),
                 new ShortcutAction("dseeauto", "DSEE Extreme: Auto"),
-                new ShortcutAction("dseeoff", "DSEE Extreme: Off")
+                new ShortcutAction("dseeoff", "DSEE Extreme: Off"),
+                new ShortcutAction("multipointon", "Multipoint support: On"),
+                new ShortcutAction("multipointoff", "Multipoint support: Off"),
+                new ShortcutAction("speakon", "Speak-to-Chat: On"),
+                new ShortcutAction("speakoff", "Speak-to-Chat: Off"),
+                new ShortcutAction("pauseon", "Pause when headphones are removed: On"),
+                new ShortcutAction("pauseoff", "Pause when headphones are removed: Off"),
+                new ShortcutAction("touchon", "Touch sensor control panel: On"),
+                new ShortcutAction("touchoff", "Touch sensor control panel: Off"),
+                new ShortcutAction("autopowerremoved", "Automatic power off: On"),
+                new ShortcutAction("autopowerdisabled", "Automatic power off: Off")
             };
         }
 
@@ -1293,11 +1358,7 @@ namespace Xm5ControlUi
             if (configureShortcutsButton == null || configureShortcutsButton.IsDisposed) return;
             int assigned = AssignedShortcutCount();
             configureShortcutsButton.Text = assigned == 0 ? "Shortcuts" : "Shortcuts (" + assigned + ")";
-            if (configureShortcutsButton.Parent != null)
-            {
-                configureShortcutsButton.Size = new Size(configureShortcutsButton.Text.Length > 11 ? 126 : 108, 32);
-                configureShortcutsButton.Location = new Point(configureShortcutsButton.Parent.Width - configureShortcutsButton.Width - CardInset, 21);
-            }
+            LayoutShortcutsRow(configureShortcutsButton.Parent);
         }
 
         private void RegisterShortcutHotkeys()
@@ -1380,6 +1441,18 @@ namespace Xm5ControlUi
             {
                 await SetEqualizerFlatAsync();
             }
+            else if (string.Equals(actionId, "eqmanual", StringComparison.OrdinalIgnoreCase))
+            {
+                await SendEqualizerPresetAsync(0xA0);
+            }
+            else if (string.Equals(actionId, "equser1", StringComparison.OrdinalIgnoreCase))
+            {
+                await SendEqualizerPresetAsync(0xA1);
+            }
+            else if (string.Equals(actionId, "equser2", StringComparison.OrdinalIgnoreCase))
+            {
+                await SendEqualizerPresetAsync(0xA2);
+            }
             else if (string.Equals(actionId, "soundquality", StringComparison.OrdinalIgnoreCase))
             {
                 await SetConnectionQualityAsync(true);
@@ -1395,6 +1468,46 @@ namespace Xm5ControlUi
             else if (string.Equals(actionId, "dseeoff", StringComparison.OrdinalIgnoreCase))
             {
                 await SetDseeAsync(false);
+            }
+            else if (string.Equals(actionId, "multipointon", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetMultipointAsync(true);
+            }
+            else if (string.Equals(actionId, "multipointoff", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetMultipointAsync(false);
+            }
+            else if (string.Equals(actionId, "speakon", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetSpeakToChatAsync(true);
+            }
+            else if (string.Equals(actionId, "speakoff", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetSpeakToChatAsync(false);
+            }
+            else if (string.Equals(actionId, "pauseon", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetWearPauseAsync(true);
+            }
+            else if (string.Equals(actionId, "pauseoff", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetWearPauseAsync(false);
+            }
+            else if (string.Equals(actionId, "touchon", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetTouchPanelAsync(true);
+            }
+            else if (string.Equals(actionId, "touchoff", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetTouchPanelAsync(false);
+            }
+            else if (string.Equals(actionId, "autopowerremoved", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetAutoPowerRemovedAsync();
+            }
+            else if (string.Equals(actionId, "autopowerdisabled", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetAutoPowerDisabledAsync();
             }
         }
 
@@ -1549,7 +1662,16 @@ namespace Xm5ControlUi
         private void ParseBattery(string output)
         {
             var match = Regex.Match(output, @"battery:\s*(.+)");
-            if (match.Success && batteryLabel != null) batteryLabel.Text = match.Groups[1].Value.Trim();
+            if (match.Success && batteryLabel != null) batteryLabel.Text = FormatBatteryText(match.Groups[1].Value);
+        }
+
+        private static string FormatBatteryText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return "Waiting";
+            string value = Regex.Replace(text.Trim(), @"\s*\((?:not-charging|charging|charged|unknown)\)", "", RegexOptions.IgnoreCase);
+            value = Regex.Replace(value, @"\s+,", ",");
+            value = Regex.Replace(value, @"\s{2,}", " ");
+            return value.Trim();
         }
 
         private void ParseExtraSettings(string output)
@@ -1566,23 +1688,30 @@ namespace Xm5ControlUi
                 SetMultipointState(HexByte(multipoint.Groups[1].Value) == 0);
             }
 
-            var eqParam = Regex.Match(output, @"payload:\s*57\s+00\s+([0-9A-F]{2})\s+06\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})", RegexOptions.IgnoreCase);
-            if (eqParam.Success)
+            int eqPreset;
+            int[] eqValues;
+            if (TryParseEqualizerState(output, out eqPreset, out eqValues))
             {
-                int preset = HexByte(eqParam.Groups[1].Value);
-                int[] values = new int[6];
-                for (int i = 0; i < values.Length; i++) values[i] = HexByte(eqParam.Groups[i + 2].Value);
-                UpdateEqualizerUi(preset, values);
+                if (HasEqValues(eqValues))
+                {
+                    UpdateEqualizerUi(eqPreset, eqValues);
+                }
+                else
+                {
+                    currentEqPreset = eqPreset;
+                    SelectEqPresetSilently(eqPreset);
+                    if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqPreset(eqPreset);
+                    if (eqCurve != null) eqCurve.SetState(eqPreset, null);
+                }
             }
             else
             {
                 var equalizer = Regex.Match(output, @"payload:\s*53\s+00\s+([0-9A-F]{2})", RegexOptions.IgnoreCase);
-                if (equalizer.Success && equalizerLabel != null)
+                if (equalizer.Success && eqCardSummaryLabel != null)
                 {
                     int state = HexByte(equalizer.Groups[1].Value);
                     string text = state == 0 ? "Enabled, waiting for bands" : "Off";
-                    equalizerLabel.Text = text;
-                    if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = text;
+                    eqCardSummaryLabel.Text = text;
                 }
             }
 
@@ -1661,9 +1790,147 @@ namespace Xm5ControlUi
             await RunBackendAsync(WithDevice("raw \"E8 01 " + (enabled ? "01" : "00") + "\" --ack-only --timeout 1200"), "Setting DSEE");
         }
 
+        private async Task SendEqualizerPresetAsync(int preset)
+        {
+            CancelLiveEqualizerApply();
+            InvalidateEqualizerFetch();
+            int[] cachedValues;
+            bool hasCachedValues = TryGetCachedEqValues(preset, out cachedValues);
+            currentEqPreset = preset;
+            string label = hasCachedValues ? FormatEqSummary(preset, cachedValues) : FormatEqPreset(preset);
+            if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = label;
+            if (eqCurve != null) eqCurve.SetState(preset, cachedValues);
+            if (hasCachedValues) UpdateEqualizerUi(preset, cachedValues);
+            lastActionLabel.Text = "Equalizer preset updating";
+
+            string payload = FormatEqualizerPresetPayload(preset);
+            var output = await RunBackendSilentAsync(WithDevice("batch \"" + payload + "\" --timeout 800"));
+            if (IsClosing) return;
+            if (output.Contains("Could not open"))
+            {
+                SetStatus("Device not reachable", red);
+                lastActionLabel.Text = "Equalizer preset not sent";
+                return;
+            }
+
+            int responsePreset;
+            int[] responseValues;
+            if (TryParseEqualizerState(output, out responsePreset, out responseValues) && responsePreset == preset)
+            {
+                if (HasEqValues(responseValues))
+                {
+                    UpdateEqualizerUi(responsePreset, responseValues);
+                }
+                else
+                {
+                    await RefreshEqualizerQuietAsync(preset);
+                }
+            }
+            else if (hasCachedValues)
+            {
+                UpdateEqualizerUi(preset, cachedValues);
+            }
+            else
+            {
+                await RefreshEqualizerQuietAsync(preset);
+            }
+            lastActionLabel.Text = "Equalizer preset updated";
+        }
+
+        private async Task SaveEqualizerUserPresetAsync(int preset)
+        {
+            if (preset != 0xA1 && preset != 0xA2) return;
+            CancelLiveEqualizerApply();
+            InvalidateEqualizerFetch();
+            int[] values = CurrentEqValues();
+            string presetName = FormatEqPreset(preset);
+            lastActionLabel.Text = "Saving " + presetName;
+
+            string payload = FormatEqualizerPayload(preset, values);
+            var output = await RunBackendSilentAsync(WithDevice("raw \"" + payload + "\" --ack-only --timeout 1200"));
+            if (IsClosing) return;
+            if (output.Contains("Could not open"))
+            {
+                SetStatus("Device not reachable", red);
+                lastActionLabel.Text = presetName + " not saved";
+                return;
+            }
+
+            CacheEqValues(preset, values);
+            currentEqPreset = preset;
+            SelectEqPresetSilently(preset);
+            if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
+            if (eqCurve != null) eqCurve.SetState(preset, values);
+            lastActionLabel.Text = presetName + " saved";
+        }
+
+        private void ShowEqualizerSaveMenu(Control anchor)
+        {
+            if (anchor == null || anchor.IsDisposed) return;
+            var menu = new ContextMenuStrip
+            {
+                BackColor = Color.FromArgb(36, 38, 42),
+                ForeColor = ink,
+                ShowImageMargin = false,
+                Padding = new Padding(4)
+            };
+            AddEqualizerSaveMenuItem(menu, "Save to User 1", 0xA1);
+            AddEqualizerSaveMenuItem(menu, "Save to User 2", 0xA2);
+            menu.Closed += (s, e) => DisposeContextMenuLater(menu);
+            try
+            {
+                menu.Show(anchor, new Point(0, anchor.Height + 4));
+            }
+            catch
+            {
+                menu.Dispose();
+            }
+        }
+
+        private void AddEqualizerSaveMenuItem(ContextMenuStrip menu, string text, int preset)
+        {
+            var item = new ToolStripMenuItem(text)
+            {
+                BackColor = Color.FromArgb(36, 38, 42),
+                ForeColor = ink
+            };
+            item.Click += async (s, e) => await RunUiTaskAsync(() => SaveEqualizerUserPresetAsync(preset));
+            menu.Items.Add(item);
+        }
+
+        private void DisposeContextMenuLater(ContextMenuStrip menu)
+        {
+            if (menu == null || menu.IsDisposed) return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (!menu.IsDisposed) menu.Dispose();
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        private async Task RefreshEqualizerQuietAsync(int expectedPreset)
+        {
+            int fetchGeneration = ++eqFetchGeneration;
+            var output = await RunBackendSilentAsync(WithDevice("batch \"56 00\" --timeout 800"));
+            if (IsClosing || string.IsNullOrWhiteSpace(output) || output.Contains("Could not open")) return;
+
+            int preset;
+            int[] values;
+            if (fetchGeneration != eqFetchGeneration || !TryParseEqualizerState(output, out preset, out values)) return;
+            if (expectedPreset >= 0 && preset != expectedPreset) return;
+            if (!HasEqValues(values)) return;
+            UpdateEqualizerUi(preset, values);
+        }
+
         private async Task SendEqualizerCurrentAsync(bool quiet)
         {
             if (eqSliders == null || eqSliders.Length != 6) return;
+            InvalidateEqualizerFetch();
             var choice = eqPresetBox != null ? eqPresetBox.SelectedItem as EqPresetChoice : null;
             int preset = choice != null ? choice.Value : currentEqPreset;
             int[] values = new int[6];
@@ -1673,7 +1940,7 @@ namespace Xm5ControlUi
             }
 
             currentEqPreset = preset;
-            if (equalizerLabel != null) equalizerLabel.Text = FormatEqSummary(preset, values);
+            CacheEqValues(preset, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
             if (eqCurve != null) eqCurve.SetState(preset, values);
             lastActionLabel.Text = quiet ? "Equalizer updating" : "Equalizer applied";
@@ -1712,6 +1979,11 @@ namespace Xm5ControlUi
                 values[3],
                 values[4],
                 values[5]);
+        }
+
+        private static string FormatEqualizerPresetPayload(int preset)
+        {
+            return string.Format("58 00 {0:X2} 00", preset);
         }
 
         private void ScheduleLiveEqualizerApply()
@@ -1758,7 +2030,6 @@ namespace Xm5ControlUi
         {
             CancelLiveEqualizerApply();
             if (eqSliders != null) ResetEqSliders();
-            if (equalizerLabel != null) equalizerLabel.Text = "Manual / Flat";
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = "Manual / Flat";
             lastActionLabel.Text = "Equalizer set to flat";
             await RunBackendAsync(WithDevice("raw \"58 00 A0 06 0A 0A 0A 0A 0A 0A\" --ack-only --timeout 1200"), "Setting equalizer");
@@ -1777,9 +2048,10 @@ namespace Xm5ControlUi
                     eqSliders[i].Value = 10;
                     if (eqValueLabels != null && eqValueLabels[i] != null) eqValueLabels[i].Text = FormatEqValue(10);
                 }
-                if (equalizerLabel != null) equalizerLabel.Text = "Manual / Flat";
                 if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = "Manual / Flat";
-                if (eqCurve != null) eqCurve.SetState(0xA0, new int[] { 10, 10, 10, 10, 10, 10 });
+                int[] flatValues = new int[] { 10, 10, 10, 10, 10, 10 };
+                CacheEqValues(0xA0, flatValues);
+                if (eqCurve != null) eqCurve.SetState(0xA0, flatValues);
                 lastActionLabel.Text = "Equalizer flattened";
             }
             finally
@@ -1791,7 +2063,7 @@ namespace Xm5ControlUi
         private void UpdateEqualizerUi(int preset, int[] values)
         {
             currentEqPreset = preset;
-            if (equalizerLabel != null) equalizerLabel.Text = FormatEqSummary(preset, values);
+            CacheEqValues(preset, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
             if (eqCurve != null) eqCurve.SetState(preset, values);
             if (eqSliders == null || values == null || values.Length < 6) return;
@@ -1827,6 +2099,19 @@ namespace Xm5ControlUi
             }
         }
 
+        private void SelectEqPresetSilently(int preset)
+        {
+            updatingEqUi = true;
+            try
+            {
+                SelectEqPreset(preset);
+            }
+            finally
+            {
+                updatingEqUi = false;
+            }
+        }
+
         private int[] CurrentEqValues()
         {
             int[] values = new int[6];
@@ -1837,10 +2122,94 @@ namespace Xm5ControlUi
             return values;
         }
 
+        private void HandleEqualizerSliderChanged(SliderControl changed)
+        {
+            int index = eqSliders == null ? -1 : Array.IndexOf(eqSliders, changed);
+            if (index >= 0 && eqValueLabels != null && index < eqValueLabels.Length && eqValueLabels[index] != null)
+            {
+                eqValueLabels[index].Text = FormatEqValue(changed.Value);
+            }
+            if (updatingEqUi) return;
+
+            int[] values = currentEqPreset == 0xA0 ? CurrentEqValues() : ResolveEqValuesForManualEdit(currentEqPreset);
+            if (index >= 0 && index < values.Length) values[index] = Math.Max(0, Math.Min(20, changed.Value));
+
+            currentEqPreset = 0xA0;
+            SelectEqPresetSilently(0xA0);
+            CacheEqValues(0xA0, values);
+            if (eqCurve != null) eqCurve.SetState(0xA0, values);
+            if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(0xA0, values);
+            lastActionLabel.Text = "Equalizer updating";
+            ScheduleLiveEqualizerApply();
+        }
+
+        private int[] ResolveEqValuesForManualEdit(int preset)
+        {
+            int[] cachedValues;
+            if (TryGetCachedEqValues(preset, out cachedValues)) return cachedValues;
+            return CurrentEqValues();
+        }
+
+        private bool TryParseEqualizerState(string output, out int preset, out int[] values)
+        {
+            preset = 0;
+            values = null;
+
+            var eqParam = Regex.Match(output, @"payload:\s*(?:57|59)\s+00\s+([0-9A-F]{2})\s+06\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})", RegexOptions.IgnoreCase);
+            if (eqParam.Success)
+            {
+                preset = HexByte(eqParam.Groups[1].Value);
+                values = new int[6];
+                for (int i = 0; i < values.Length; i++) values[i] = HexByte(eqParam.Groups[i + 2].Value);
+                return true;
+            }
+
+            var eqPresetOnly = Regex.Match(output, @"payload:\s*(?:57|59)\s+00\s+([0-9A-F]{2})\s+00\b", RegexOptions.IgnoreCase);
+            if (eqPresetOnly.Success)
+            {
+                preset = HexByte(eqPresetOnly.Groups[1].Value);
+                return true;
+            }
+
+            return false;
+        }
+
+        private void CacheEqValues(int preset, int[] values)
+        {
+            if (!HasEqValues(values)) return;
+            int[] copy = new int[6];
+            for (int i = 0; i < copy.Length; i++) copy[i] = Math.Max(0, Math.Min(20, values[i]));
+            eqBandCache[preset] = copy;
+        }
+
+        private bool TryGetCachedEqValues(int preset, out int[] values)
+        {
+            int[] cached;
+            if (eqBandCache.TryGetValue(preset, out cached) && HasEqValues(cached))
+            {
+                values = new int[6];
+                Array.Copy(cached, values, values.Length);
+                return true;
+            }
+
+            values = null;
+            return false;
+        }
+
+        private static bool HasEqValues(int[] values)
+        {
+            return values != null && values.Length >= 6;
+        }
+
+        private void InvalidateEqualizerFetch()
+        {
+            eqFetchGeneration++;
+        }
+
         private async Task SetConnectionQualityAsync(bool prioritizeSound)
         {
             SetConnectionQualityState(prioritizeSound);
-            lastActionLabel.Text = prioritizeSound ? "Prioritizing sound quality" : "Prioritizing stable connection";
+            lastActionLabel.Text = prioritizeSound ? "Connection quality set to quality" : "Connection quality set to stability";
             await RunBackendAsync(WithDevice("raw \"E8 00 " + (prioritizeSound ? "00" : "01") + "\" --ack-only --timeout 1200"), "Setting connection quality");
         }
 
@@ -1876,14 +2245,14 @@ namespace Xm5ControlUi
         private async Task SetAutoPowerRemovedAsync()
         {
             SetAutoPowerState("removed");
-            lastActionLabel.Text = "Auto power off when removed";
+            lastActionLabel.Text = "Automatic power off set to on";
             await RunBackendAsync(WithDevice("raw \"28 05 10 00\" --ack-only --timeout 1200"), "Setting auto power");
         }
 
         private async Task SetAutoPowerDisabledAsync()
         {
             SetAutoPowerState("disabled");
-            lastActionLabel.Text = "Automatic power off disabled";
+            lastActionLabel.Text = "Automatic power off set to off";
             await RunBackendAsync(WithDevice("raw \"28 05 11 00\" --ack-only --timeout 1200"), "Setting auto power");
         }
 
@@ -1928,7 +2297,7 @@ namespace Xm5ControlUi
             SetBusy(true, busyText);
             try
             {
-                var output = await Task.Run(() => RunBackendProcess(args));
+                var output = await RunBackendProcessPacedAsync(args);
                 if (IsClosing) return output;
 
                 if (output.Contains("Could not open")) SetStatus("Device not reachable", red);
@@ -1954,7 +2323,34 @@ namespace Xm5ControlUi
             if (!commandGate.Wait(0)) return null;
             try
             {
-                var output = await Task.Run(() => RunBackendProcess(args));
+                var output = await RunBackendProcessPacedAsync(args);
+                return IsClosing ? "" : output;
+            }
+            catch
+            {
+                return "";
+            }
+            finally
+            {
+                commandGate.Release();
+            }
+        }
+
+        private async Task<string> RunBackendSilentAsync(string args)
+        {
+            if (IsClosing) return "";
+            if (!File.Exists(backendPath)) return "";
+
+            await commandGate.WaitAsync();
+            if (IsClosing)
+            {
+                commandGate.Release();
+                return "";
+            }
+
+            try
+            {
+                var output = await RunBackendProcessPacedAsync(args);
                 return IsClosing ? "" : output;
             }
             catch
@@ -1987,6 +2383,34 @@ namespace Xm5ControlUi
                 process.WaitForExit();
                 return stdout + stderr;
             }
+        }
+
+        private async Task<string> RunBackendProcessPacedAsync(string args)
+        {
+            bool shouldPace = ShouldPaceBackendCommand(args);
+            if (shouldPace) await WaitForBackendPaceAsync();
+            try
+            {
+                return await Task.Run(() => RunBackendProcess(args));
+            }
+            finally
+            {
+                if (shouldPace) lastBackendCommandAtUtc = DateTime.UtcNow;
+            }
+        }
+
+        private async Task WaitForBackendPaceAsync()
+        {
+            if (lastBackendCommandAtUtc == DateTime.MinValue) return;
+
+            double elapsedMs = (DateTime.UtcNow - lastBackendCommandAtUtc).TotalMilliseconds;
+            int delayMs = BackendCommandPaceMs - (int)elapsedMs;
+            if (delayMs > 0) await Task.Delay(delayMs);
+        }
+
+        private static bool ShouldPaceBackendCommand(string args)
+        {
+            return args != null && args.IndexOf("--ack-only", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void SetBusy(bool value, string label)
@@ -2159,7 +2583,12 @@ namespace Xm5ControlUi
             foreach (var button in buttons) parent.Controls.Add(button);
             Action layout = () =>
             {
-                int buttonArea = buttons.Length == 0 ? 0 : 226;
+                int buttonArea = 0;
+                for (int i = 0; i < buttons.Length; i++)
+                {
+                    buttonArea += OptionButtonWidth(buttons[i]);
+                    if (i > 0) buttonArea += 8;
+                }
                 int textWidth = Math.Max(140, parent.Width - buttonArea - (CardInset * 2 + 10));
                 captionLabel.Width = textWidth;
                 valueLabel.Width = textWidth;
@@ -2167,7 +2596,7 @@ namespace Xm5ControlUi
                 int x = parent.Width - CardInset;
                 for (int i = buttons.Length - 1; i >= 0; i--)
                 {
-                    int width = buttons[i].Text.Length > 8 ? 116 : 74;
+                    int width = OptionButtonWidth(buttons[i]);
                     x -= width;
                     buttons[i].Location = new Point(x, top + 8);
                     buttons[i].Size = new Size(width, 32);
@@ -2177,6 +2606,13 @@ namespace Xm5ControlUi
             parent.Resize += (s, e) => layout();
             layout();
             return valueLabel;
+        }
+
+        private static int OptionButtonWidth(PillButton button)
+        {
+            if (button == null) return 74;
+            int textWidth = TextRenderer.MeasureText(button.Text, button.Font, Size.Empty, TextFormatFlags.NoPadding).Width;
+            return Math.Max(74, Math.Min(164, textWidth + 34));
         }
 
         private void AddDivider(Control parent, int top)
@@ -2296,7 +2732,7 @@ namespace Xm5ControlUi
                 case 4:
                     return "15 minutes";
                 case 0x11:
-                    return "Disabled";
+                    return "Off";
                 default:
                     return "Unknown";
             }
