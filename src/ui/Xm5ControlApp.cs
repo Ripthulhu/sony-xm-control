@@ -674,7 +674,15 @@ namespace Xm5ControlUi
             offButton.Click += async (s, e) => await SetOffAsync();
 
             AddDivider(parent, 140);
-            AddEyebrow(parent, "Ambient sound", 166);
+            var ambientLabel = new Label
+            {
+                Text = "Ambient sound",
+                ForeColor = Color.FromArgb(190, 198, 207),
+                Font = new Font("Segoe UI Semibold", 9.2f),
+                AutoSize = true
+            };
+            parent.Controls.Add(ambientLabel);
+
             levelLabel = new Label
             {
                 Text = "Level 12",
@@ -728,8 +736,9 @@ namespace Xm5ControlUi
                 int sliderVisibleBottom = sliderHeight / 2 + 12;
                 int sliderTop = Math.Max(212, parent.Height - 22 - sliderVisibleBottom);
                 int inputTop = sliderTop - 36;
-                int labelTop = inputTop - 22;
+                int labelTop = inputTop - 28;
                 int right = parent.Width - CardInset;
+                ambientLabel.Location = new Point(CardInset, labelTop);
                 levelLabel.Location = new Point(right - levelLabel.Width, labelTop);
                 apply.Location = new Point(right - apply.Width, inputTop);
 
