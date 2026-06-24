@@ -684,9 +684,6 @@ namespace Xm5ControlUi
                 Anchor = AnchorStyles.Top | AnchorStyles.Right
             };
             parent.Controls.Add(levelLabel);
-            Action placeLevelLabel = () => levelLabel.Location = new Point(parent.Width - levelLabel.Width - CardInset, 166);
-            parent.Resize += (s, e) => placeLevelLabel();
-            placeLevelLabel();
 
             ambientKindBox = new ChoiceDropdown
             {
@@ -694,7 +691,7 @@ namespace Xm5ControlUi
                 BackColor = cardSoft,
                 ForeColor = ink,
                 FlatStyle = FlatStyle.Flat,
-                Location = new Point(CardInset, 190),
+                Location = new Point(CardInset, 188),
                 Width = 160
             };
             ambientKindBox.Items.AddRange(new object[] { "Normal", "Voice" });
@@ -714,31 +711,37 @@ namespace Xm5ControlUi
                 FillColor = blue,
                 ThumbColor = blue,
                 TickColor = Color.FromArgb(91, 98, 108),
-                Location = new Point(CardInset, 232),
+                Location = new Point(CardInset, 224),
                 Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top
             };
             parent.Controls.Add(levelSlider);
-            Action placeLevelSlider = () =>
-            {
-                levelSlider.Location = new Point(CardInset - 12, 232);
-                levelSlider.Size = new Size(Math.Max(220, parent.Width - (CardInset * 2) + 24), 34);
-            };
-            parent.Resize += (s, e) => placeLevelSlider();
-            placeLevelSlider();
-            levelSlider.ValueChanged += (s, e) =>
-            {
-                levelLabel.Text = "Level " + levelSlider.Value;
-                levelLabel.Left = parent.Width - levelLabel.Width - CardInset;
-            };
 
             var apply = new PillButton("Apply", blue, bluePressed);
-            apply.Size = new Size(108, 36);
+            apply.Size = new Size(108, 34);
             apply.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             apply.Click += async (s, e) => await SetAmbientAsync(levelSlider.Value, IsVoiceAmbientSelected());
             parent.Controls.Add(apply);
-            Action placeApply = () => apply.Location = new Point(parent.Width - apply.Width - CardInset, 188);
-            parent.Resize += (s, e) => placeApply();
-            placeApply();
+
+            Action layoutAmbientControls = () =>
+            {
+                int right = parent.Width - CardInset;
+                levelLabel.Location = new Point(right - levelLabel.Width, 166);
+                apply.Location = new Point(right - apply.Width, 188);
+
+                int dropdownRight = apply.Left - 18;
+                ambientKindBox.Location = new Point(CardInset, 188);
+                ambientKindBox.Width = Math.Max(150, Math.Min(220, dropdownRight - CardInset));
+
+                levelSlider.Location = new Point(CardInset - 12, 224);
+                levelSlider.Size = new Size(Math.Max(220, parent.Width - (CardInset * 2) + 24), 38);
+            };
+            parent.Resize += (s, e) => layoutAmbientControls();
+            layoutAmbientControls();
+            levelSlider.ValueChanged += (s, e) =>
+            {
+                levelLabel.Text = "Level " + levelSlider.Value;
+                layoutAmbientControls();
+            };
         }
 
         private void BuildEqualizer(CardPanel parent)
