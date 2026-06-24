@@ -303,6 +303,7 @@ namespace Xm5ControlUi
         private bool commandBusy;
         private bool autoDetectRunning;
         private bool lastStateRefreshConnected;
+        private bool immediateExitQueued;
         private DateTime lastBackendCommandAtUtc = DateTime.MinValue;
 
         private Label titleLabel;
@@ -368,8 +369,13 @@ namespace Xm5ControlUi
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
         private const int WmHotKey = 0x0312;
+        private const int WmClose = 0x0010;
         private const int ShortcutHotkeyBaseId = 0x5300;
+        private const int SwHide = 0;
 
         public MainForm()
         {
@@ -429,8 +435,7 @@ namespace Xm5ControlUi
             {
                 if (!IsClosing && hasShownOnce && WindowState == FormWindowState.Minimized && minimizeToTray)
                 {
-                    ShowInTaskbar = false;
-                    Hide();
+                    ConcealMainWindow(removeFromTaskbar: true);
                     Notify("Still running in the tray.");
                 }
             };
@@ -469,6 +474,17 @@ namespace Xm5ControlUi
 
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == WmClose)
+            {
+                if (!exiting && minimizeToTray)
+                {
+                    HideToTrayFromClose();
+                    return;
+                }
+                QueueImmediateExit();
+                return;
+            }
+
             if (m.Msg == WmHotKey)
             {
                 ShortcutAction action;
@@ -566,7 +582,7 @@ namespace Xm5ControlUi
             };
             header.Controls.Add(statusLabel);
 
-            appSettingsButton = new GearButton(Color.FromArgb(44, 48, 54), Color.FromArgb(61, 67, 76), Color.FromArgb(78, 86, 96), ink)
+            appSettingsButton = new GearButton(Color.FromArgb(44, 48, 54), Color.FromArgb(61, 67, 76), Color.FromArgb(78, 86, 96))
             {
                 Size = new Size(36, 36),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right
@@ -1226,11 +1242,7 @@ namespace Xm5ControlUi
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit", null, (s, e) =>
             {
-                PostToUi(() =>
-                {
-                    exiting = true;
-                    Close();
-                });
+                PostToUi(QueueImmediateExit);
             });
             return menu;
         }
@@ -1245,7 +1257,7 @@ namespace Xm5ControlUi
 
         private string AppTitle()
         {
-            return "Sony XM Control";
+            return "XM Control";
         }
 
         private string TrayTitle()
@@ -1306,11 +1318,17 @@ namespace Xm5ControlUi
 
         private static string StartupShortcutPath()
         {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "XM Control.lnk");
+        }
+
+        private static string LegacyStartupShortcutPath()
+        {
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "Sony XM Control.lnk");
         }
 
         private void LoadAppPreferences()
         {
+            minimizeToTray = true;
             startMinimizedToTray = false;
             string path = AppSettingsConfigPath();
             if (!File.Exists(path)) return;
@@ -1330,6 +1348,10 @@ namespace Xm5ControlUi
                     {
                         startMinimizedToTray = ParseBool(value);
                     }
+                    else if (string.Equals(key, "MinimizeToTrayOnClose", StringComparison.OrdinalIgnoreCase))
+                    {
+                        minimizeToTray = ParseBool(value);
+                    }
                 }
             }
             catch
@@ -1345,7 +1367,8 @@ namespace Xm5ControlUi
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 File.WriteAllLines(path, new[]
                 {
-                    "StartMinimizedInTray=" + (startMinimizedToTray ? "true" : "false")
+                    "StartMinimizedInTray=" + (startMinimizedToTray ? "true" : "false"),
+                    "MinimizeToTrayOnClose=" + (minimizeToTray ? "true" : "false")
                 });
             }
             catch
@@ -1364,7 +1387,7 @@ namespace Xm5ControlUi
 
         private bool IsStartAtBootEnabled()
         {
-            return File.Exists(StartupShortcutPath());
+            return File.Exists(StartupShortcutPath()) || File.Exists(LegacyStartupShortcutPath());
         }
 
         private bool SetStartAtBoot(bool enabled)
@@ -1375,10 +1398,14 @@ namespace Xm5ControlUi
                 if (!enabled)
                 {
                     if (File.Exists(shortcutPath)) File.Delete(shortcutPath);
+                    string legacyShortcutPath = LegacyStartupShortcutPath();
+                    if (File.Exists(legacyShortcutPath)) File.Delete(legacyShortcutPath);
                     return true;
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(shortcutPath));
+                string oldShortcutPath = LegacyStartupShortcutPath();
+                if (File.Exists(oldShortcutPath)) File.Delete(oldShortcutPath);
                 object shell = null;
                 object shortcut = null;
                 try
@@ -1390,7 +1417,7 @@ namespace Xm5ControlUi
                     Type shortcutType = shortcut.GetType();
                     shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { Application.ExecutablePath });
                     shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { AppDomain.CurrentDomain.BaseDirectory });
-                    shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "Sony XM Control" });
+                    shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "XM Control" });
                     shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { Application.ExecutablePath + ",0" });
                     shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
                     return true;
@@ -1479,7 +1506,7 @@ namespace Xm5ControlUi
             if (!Visible || WindowState == FormWindowState.Minimized) ShowWindow();
 
             bool startAtBoot = IsStartAtBootEnabled();
-            using (var dialog = new AppSettingsDialog(startAtBoot, startMinimizedToTray, page, card, cardSoft, line, ink, subdued, blue, bluePressed))
+            using (var dialog = new AppSettingsDialog(startAtBoot, startMinimizedToTray, minimizeToTray, page, card, cardSoft, line, ink, subdued, blue, bluePressed))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 if (!SetStartAtBoot(dialog.StartAtBoot))
@@ -1490,6 +1517,7 @@ namespace Xm5ControlUi
                 }
 
                 startMinimizedToTray = dialog.StartMinimizedInTray;
+                minimizeToTray = dialog.MinimizeToTrayOnClose;
                 SaveAppPreferences();
                 if (lastActionLabel != null && !lastActionLabel.IsDisposed) lastActionLabel.Text = "App settings saved";
                 SetStatus("App settings saved", subdued);
@@ -2662,30 +2690,50 @@ namespace Xm5ControlUi
             if (!exiting && minimizeToTray && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
-                ShowInTaskbar = false;
-                Hide();
-                Notify("Quick controls are available in the tray.");
+                HideToTrayFromClose();
+                return;
+            }
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                QueueImmediateExit();
                 return;
             }
             if (trayCleanupStarted) return;
             exiting = true;
-            trayCleanupStarted = true;
             trayNotifications = false;
             UnregisterShortcutHotkeys();
             if (autoDetectTimer != null)
             {
                 autoDetectTimer.Stop();
-                autoDetectTimer.Dispose();
             }
             if (liveEqTimer != null)
             {
                 liveEqTimer.Stop();
-                liveEqTimer.Dispose();
             }
             if (trayMenu != null && trayMenu.Visible)
             {
                 trayMenu.Close(ToolStripDropDownCloseReason.CloseCalled);
             }
+            if (trayIcon != null)
+            {
+                trayIcon.Visible = false;
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            CleanupAfterClosed();
+            base.OnFormClosed(e);
+        }
+
+        private void CleanupAfterClosed()
+        {
+            if (trayCleanupStarted) return;
+            trayCleanupStarted = true;
+
+            if (autoDetectTimer != null) autoDetectTimer.Dispose();
+            if (liveEqTimer != null) liveEqTimer.Dispose();
             if (trayIcon != null)
             {
                 trayIcon.ContextMenuStrip = null;
@@ -2702,6 +2750,51 @@ namespace Xm5ControlUi
             Icon = null;
             notificationIcon.Dispose();
             windowIcon.Dispose();
+        }
+
+        private void HideToTrayFromClose()
+        {
+            ConcealMainWindow(removeFromTaskbar: true);
+            Notify("Quick controls are available in the tray.");
+        }
+
+        private void ConcealMainWindow(bool removeFromTaskbar)
+        {
+            try
+            {
+                if (IsHandleCreated) ShowWindow(Handle, SwHide);
+                Hide();
+                if (removeFromTaskbar) ShowInTaskbar = false;
+            }
+            catch
+            {
+            }
+        }
+
+        private void QueueImmediateExit()
+        {
+            if (immediateExitQueued) return;
+            immediateExitQueued = true;
+            exiting = true;
+            trayNotifications = false;
+            ConcealMainWindow(removeFromTaskbar: true);
+            try { Opacity = 0; } catch { }
+
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    CleanupAfterClosed();
+                    Dispose();
+                    Application.ExitThread();
+                }));
+            }
+            catch
+            {
+                CleanupAfterClosed();
+                Dispose();
+                Application.ExitThread();
+            }
         }
 
         private CardPanel CreateCard()
@@ -3016,11 +3109,14 @@ namespace Xm5ControlUi
         private PillButton startAtBootOffButton;
         private PillButton startMinimizedOnButton;
         private PillButton startMinimizedOffButton;
+        private PillButton minimizeOnCloseOnButton;
+        private PillButton minimizeOnCloseOffButton;
 
         public bool StartAtBoot { get; private set; }
         public bool StartMinimizedInTray { get; private set; }
+        public bool MinimizeToTrayOnClose { get; private set; }
 
-        public AppSettingsDialog(bool startAtBoot, bool startMinimizedInTray, Color page, Color card, Color cardSoft, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
+        public AppSettingsDialog(bool startAtBoot, bool startMinimizedInTray, bool minimizeToTrayOnClose, Color page, Color card, Color cardSoft, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
         {
             this.page = page;
             this.card = card;
@@ -3033,17 +3129,24 @@ namespace Xm5ControlUi
             inactivePressed = Color.FromArgb(50, 55, 63);
             StartAtBoot = startAtBoot;
             StartMinimizedInTray = startMinimizedInTray;
+            MinimizeToTrayOnClose = minimizeToTrayOnClose;
 
             Text = "App settings";
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(520, 318);
+            ClientSize = new Size(560, 420);
             BackColor = page;
             ForeColor = ink;
             Font = new Font("Segoe UI", 10f);
             Build();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            TryApplyWindows11Chrome();
         }
 
         private void Build()
@@ -3061,7 +3164,7 @@ namespace Xm5ControlUi
             var panel = new Panel
             {
                 Location = new Point(24, 70),
-                Size = new Size(472, 158),
+                Size = new Size(512, 236),
                 BackColor = card,
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
@@ -3069,24 +3172,25 @@ namespace Xm5ControlUi
 
             startAtBootOnButton = NewSettingButton("On");
             startAtBootOffButton = NewSettingButton("Off");
-            AddSettingRow(panel, "Start at login", "Open Sony XM Control when you sign in.", 22, startAtBootOnButton, startAtBootOffButton);
+            AddSettingRow(panel, "Start at login", "Open XM Control when you sign in.", 22, startAtBootOnButton, startAtBootOffButton);
             startAtBootOnButton.Click += (s, e) => SetStartAtBoot(true);
             startAtBootOffButton.Click += (s, e) => SetStartAtBoot(false);
 
-            var divider = new Panel
-            {
-                BackColor = line,
-                Location = new Point(20, 82),
-                Size = new Size(panel.Width - 40, 1),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
-            };
-            panel.Controls.Add(divider);
+            AddDivider(panel, 82);
 
             startMinimizedOnButton = NewSettingButton("On");
             startMinimizedOffButton = NewSettingButton("Off");
             AddSettingRow(panel, "Start minimized in tray", "Launch quietly and keep quick controls in the tray.", 104, startMinimizedOnButton, startMinimizedOffButton);
             startMinimizedOnButton.Click += (s, e) => SetStartMinimizedInTray(true);
             startMinimizedOffButton.Click += (s, e) => SetStartMinimizedInTray(false);
+
+            AddDivider(panel, 160);
+
+            minimizeOnCloseOnButton = NewSettingButton("On");
+            minimizeOnCloseOffButton = NewSettingButton("Off");
+            AddSettingRow(panel, "Minimize to tray on close", "The close button hides the app instead of exiting.", 182, minimizeOnCloseOnButton, minimizeOnCloseOffButton);
+            minimizeOnCloseOnButton.Click += (s, e) => SetMinimizeToTrayOnClose(true);
+            minimizeOnCloseOffButton.Click += (s, e) => SetMinimizeToTrayOnClose(false);
 
             var save = new PillButton("Save", blue, bluePressed)
             {
@@ -3116,6 +3220,7 @@ namespace Xm5ControlUi
 
             SetStartAtBoot(StartAtBoot);
             SetStartMinimizedInTray(StartMinimizedInTray);
+            SetMinimizeToTrayOnClose(MinimizeToTrayOnClose);
         }
 
         private PillButton NewSettingButton(string text)
@@ -3128,13 +3233,15 @@ namespace Xm5ControlUi
 
         private void AddSettingRow(Control parent, string caption, string description, int top, PillButton onButton, PillButton offButton)
         {
+            int buttonBlockWidth = 178;
+            int textWidth = Math.Max(190, parent.Width - buttonBlockWidth - 54);
             var captionLabel = new Label
             {
                 Text = caption,
                 ForeColor = ink,
                 Font = new Font("Segoe UI Semibold", 10f),
                 Location = new Point(20, top),
-                Size = new Size(260, 22),
+                Size = new Size(textWidth, 22),
                 AutoEllipsis = true
             };
             parent.Controls.Add(captionLabel);
@@ -3145,7 +3252,7 @@ namespace Xm5ControlUi
                 ForeColor = subdued,
                 Font = new Font("Segoe UI", 9.2f),
                 Location = new Point(20, top + 23),
-                Size = new Size(300, 22),
+                Size = new Size(textWidth, 22),
                 AutoEllipsis = true
             };
             parent.Controls.Add(descriptionLabel);
@@ -3156,6 +3263,18 @@ namespace Xm5ControlUi
             onButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             parent.Controls.Add(onButton);
             parent.Controls.Add(offButton);
+        }
+
+        private void AddDivider(Control parent, int top)
+        {
+            var divider = new Panel
+            {
+                BackColor = line,
+                Location = new Point(20, top),
+                Size = new Size(parent.Width - 40, 1),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            parent.Controls.Add(divider);
         }
 
         private void SetStartAtBoot(bool enabled)
@@ -3170,10 +3289,42 @@ namespace Xm5ControlUi
             SetPair(startMinimizedOnButton, startMinimizedOffButton, enabled);
         }
 
+        private void SetMinimizeToTrayOnClose(bool enabled)
+        {
+            MinimizeToTrayOnClose = enabled;
+            SetPair(minimizeOnCloseOnButton, minimizeOnCloseOffButton, enabled);
+        }
+
         private void SetPair(PillButton onButton, PillButton offButton, bool enabled)
         {
             if (onButton != null) onButton.SetPalette(enabled ? blue : inactive, enabled ? bluePressed : inactivePressed);
             if (offButton != null) offButton.SetPalette(!enabled ? blue : inactive, !enabled ? bluePressed : inactivePressed);
+        }
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        private void TryApplyWindows11Chrome()
+        {
+            try
+            {
+                int enabled = 1;
+                DwmSetWindowAttribute(Handle, 20, ref enabled, sizeof(int));
+                DwmSetWindowAttribute(Handle, 19, ref enabled, sizeof(int));
+
+                int rounded = 2;
+                DwmSetWindowAttribute(Handle, 33, ref rounded, sizeof(int));
+
+                int caption = ColorTranslator.ToWin32(page);
+                int captionText = ColorTranslator.ToWin32(ink);
+                int border = ColorTranslator.ToWin32(page);
+                DwmSetWindowAttribute(Handle, 35, ref caption, sizeof(int));
+                DwmSetWindowAttribute(Handle, 36, ref captionText, sizeof(int));
+                DwmSetWindowAttribute(Handle, 34, ref border, sizeof(int));
+            }
+            catch
+            {
+            }
         }
     }
 
@@ -4142,16 +4293,14 @@ namespace Xm5ControlUi
         private readonly Color normal;
         private readonly Color hoverFill;
         private readonly Color pressedFill;
-        private readonly Color ink;
         private bool hover;
         private bool down;
 
-        public GearButton(Color normal, Color hoverFill, Color pressedFill, Color ink)
+        public GearButton(Color normal, Color hoverFill, Color pressedFill)
         {
             this.normal = normal;
             this.hoverFill = hoverFill;
             this.pressedFill = pressedFill;
-            this.ink = ink;
             FlatStyle = FlatStyle.Flat;
             BackColor = Color.Transparent;
             FlatAppearance.BorderSize = 0;
@@ -4198,35 +4347,83 @@ namespace Xm5ControlUi
         {
             pevent.Graphics.Clear(Parent != null ? Parent.BackColor : Color.Transparent);
             pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Color fill = down ? pressedFill : (hover ? hoverFill : normal);
-            Rectangle bounds = new Rectangle(1, 1, Width - 3, Height - 3);
-            using (var path = RoundedPath(bounds, 8))
-            using (var brush = new SolidBrush(fill))
+
+            if (hover || down)
             {
-                pevent.Graphics.FillPath(brush, path);
+                Color fill = down ? pressedFill : hoverFill;
+                Rectangle bounds = new Rectangle(1, 1, Width - 3, Height - 3);
+                using (var path = RoundedPath(bounds, 8))
+                using (var brush = new SolidBrush(fill))
+                {
+                    pevent.Graphics.FillPath(brush, path);
+                }
             }
 
-            DrawGear(pevent.Graphics, new PointF(Width / 2f, Height / 2f), Math.Max(6, Math.Min(Width, Height) / 4f), ink);
+            DrawGear(
+                pevent.Graphics,
+                new PointF(Width / 2f, Height / 2f),
+                Math.Max(9, Math.Min(Width, Height) * 0.31f),
+                Color.FromArgb(154, 162, 172),
+                normal,
+                Color.FromArgb(0x10, 0x9d, 0xf5));
         }
 
-        private static void DrawGear(Graphics graphics, PointF center, float radius, Color color)
+        private static void DrawGear(Graphics graphics, PointF center, float radius, Color gearColor, Color centerCutoutColor, Color accentColor)
         {
-            using (var pen = new Pen(color, 1.8f))
+            using (var gearPath = GearPath(center, radius))
+            using (var gearBrush = new SolidBrush(gearColor))
+            using (var gearPen = new Pen(Color.FromArgb(102, 111, 122), 1.1f))
             {
-                pen.StartCap = LineCap.Round;
-                pen.EndCap = LineCap.Round;
-                for (int i = 0; i < 8; i++)
-                {
-                    double angle = (Math.PI * 2 * i) / 8.0;
-                    float x1 = center.X + (float)Math.Cos(angle) * (radius + 2);
-                    float y1 = center.Y + (float)Math.Sin(angle) * (radius + 2);
-                    float x2 = center.X + (float)Math.Cos(angle) * (radius + 5);
-                    float y2 = center.Y + (float)Math.Sin(angle) * (radius + 5);
-                    graphics.DrawLine(pen, x1, y1, x2, y2);
-                }
-                graphics.DrawEllipse(pen, center.X - radius, center.Y - radius, radius * 2, radius * 2);
-                graphics.DrawEllipse(pen, center.X - 3, center.Y - 3, 6, 6);
+                graphics.FillPath(gearBrush, gearPath);
+                graphics.DrawPath(gearPen, gearPath);
             }
+
+            float cutoutRadius = radius * 0.55f;
+            RectangleF cutout = new RectangleF(center.X - cutoutRadius, center.Y - cutoutRadius, cutoutRadius * 2, cutoutRadius * 2);
+            using (var cutoutBrush = new SolidBrush(centerCutoutColor))
+            {
+                graphics.FillEllipse(cutoutBrush, cutout);
+            }
+
+            float accentRadius = radius * 0.33f;
+            RectangleF accent = new RectangleF(center.X - accentRadius, center.Y - accentRadius, accentRadius * 2, accentRadius * 2);
+            using (var accentBrush = new SolidBrush(accentColor))
+            using (var accentPen = new Pen(Color.FromArgb(7, 79, 125), 1.0f))
+            {
+                graphics.FillEllipse(accentBrush, accent);
+                graphics.DrawEllipse(accentPen, accent);
+            }
+        }
+
+        private static GraphicsPath GearPath(PointF center, float radius)
+        {
+            int teeth = 8;
+            double step = (Math.PI * 2) / teeth;
+            float rootRadius = radius * 0.78f;
+            float outerRadius = radius * 1.12f;
+            var path = new GraphicsPath();
+            for (int i = 0; i < teeth; i++)
+            {
+                double angle = -Math.PI / 2 + (i * step);
+                PointF[] points =
+                {
+                    Polar(center, rootRadius, angle - step * 0.47),
+                    Polar(center, outerRadius, angle - step * 0.26),
+                    Polar(center, outerRadius, angle + step * 0.26),
+                    Polar(center, rootRadius, angle + step * 0.47)
+                };
+                if (i == 0) path.AddLines(points);
+                else path.AddLines(points);
+            }
+            path.CloseFigure();
+            return path;
+        }
+
+        private static PointF Polar(PointF center, float radius, double angle)
+        {
+            return new PointF(
+                center.X + (float)Math.Cos(angle) * radius,
+                center.Y + (float)Math.Sin(angle) * radius);
         }
 
         private static GraphicsPath RoundedPath(Rectangle bounds, int radius)
