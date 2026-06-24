@@ -404,7 +404,7 @@ namespace Xm5ControlUi
             BackColor = page;
             ForeColor = ink;
             Font = new Font("Segoe UI", 10f);
-            windowIcon = CreateTrayIcon();
+            windowIcon = CreateWindowIcon();
             notificationIcon = CreateTrayIcon();
             Icon = windowIcon;
             DoubleBuffered = true;
@@ -2941,20 +2941,45 @@ namespace Xm5ControlUi
             }
         }
 
+        private Icon CreateWindowIcon()
+        {
+            const int iconSize = 256;
+            var bitmap = new Bitmap(iconSize, iconSize);
+            using (var g = Graphics.FromImage(bitmap))
+            using (var bgBrush = new SolidBrush(Color.FromArgb(22, 27, 34)))
+            using (var earBrush = new SolidBrush(blue))
+            using (var bandPen = new Pen(blue, 25f))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                bandPen.StartCap = LineCap.Round;
+                bandPen.EndCap = LineCap.Round;
+                g.Clear(Color.Transparent);
+                g.FillEllipse(bgBrush, 10, 10, 236, 236);
+                g.DrawArc(bandPen, 54, 48, 148, 140, 205, 130);
+                FillRound(g, earBrush, new Rectangle(54, 126, 62, 84), 28);
+                FillRound(g, earBrush, new Rectangle(140, 126, 62, 84), 28);
+            }
+            IntPtr handle = bitmap.GetHicon();
+            Icon icon = (Icon)Icon.FromHandle(handle).Clone();
+            DestroyIcon(handle);
+            bitmap.Dispose();
+            return icon;
+        }
+
         private Icon CreateTrayIcon()
         {
             var bitmap = new Bitmap(32, 32);
             using (var g = Graphics.FromImage(bitmap))
-            using (var bgBrush = new SolidBrush(Color.FromArgb(22, 27, 34)))
-            using (var earBrush = new SolidBrush(blue))
-            using (var bandPen = new Pen(blue, 3f))
+            using (var glyphBrush = new SolidBrush(Color.FromArgb(226, 230, 235)))
+            using (var bandPen = new Pen(Color.FromArgb(226, 230, 235), 3.2f))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.FillEllipse(bgBrush, 1, 1, 30, 30);
-                g.DrawArc(bandPen, 7.5f, 7f, 17f, 16f, 205, 130);
-                FillRound(g, earBrush, new Rectangle(7, 16, 8, 10), 4);
-                FillRound(g, earBrush, new Rectangle(17, 16, 8, 10), 4);
+                g.Clear(Color.Transparent);
+                g.DrawArc(bandPen, 5.5f, 4.5f, 21f, 20f, 205, 130);
+                FillRound(g, glyphBrush, new Rectangle(6, 17, 8, 10), 4);
+                FillRound(g, glyphBrush, new Rectangle(18, 17, 8, 10), 4);
             }
             IntPtr handle = bitmap.GetHicon();
             Icon icon = (Icon)Icon.FromHandle(handle).Clone();
