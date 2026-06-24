@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Text.RegularExpressions;
@@ -285,6 +286,7 @@ namespace Xm5ControlUi
         private readonly ContextMenuStrip trayMenu;
         private readonly Icon windowIcon;
         private readonly Icon notificationIcon;
+        private readonly ToolTip toolTip = new ToolTip();
         private readonly SemaphoreSlim commandGate = new SemaphoreSlim(1, 1);
         private readonly System.Windows.Forms.Timer autoDetectTimer;
         private readonly System.Windows.Forms.Timer liveEqTimer;
@@ -294,6 +296,7 @@ namespace Xm5ControlUi
         private DateTime lastStateRefreshAt = DateTime.MinValue;
         private bool exiting;
         private bool minimizeToTray = true;
+        private bool startMinimizedToTray;
         private bool hasShownOnce;
         private bool trayNotifications = true;
         private bool trayCleanupStarted;
@@ -336,6 +339,7 @@ namespace Xm5ControlUi
         private PillButton autoPowerRemovedButton;
         private PillButton autoPowerDisableButton;
         private PillButton configureShortcutsButton;
+        private GearButton appSettingsButton;
         private SliderControl levelSlider;
         private ChoiceDropdown ambientKindBox;
         private PillButton ancButton;
@@ -380,11 +384,17 @@ namespace Xm5ControlUi
             currentProfile = profiles[0];
             shortcutActions = CreateShortcutActions();
             LoadShortcutBindings();
+            LoadAppPreferences();
 
             Text = AppTitle();
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(1180, 900);
             Size = new Size(1380, 980);
+            if (startMinimizedToTray)
+            {
+                WindowState = FormWindowState.Minimized;
+                ShowInTaskbar = false;
+            }
             BackColor = page;
             ForeColor = ink;
             Font = new Font("Segoe UI", 10f);
@@ -419,6 +429,7 @@ namespace Xm5ControlUi
             {
                 if (!IsClosing && hasShownOnce && WindowState == FormWindowState.Minimized && minimizeToTray)
                 {
+                    ShowInTaskbar = false;
                     Hide();
                     Notify("Still running in the tray.");
                 }
@@ -431,6 +442,10 @@ namespace Xm5ControlUi
             Shown += async (s, e) =>
             {
                 hasShownOnce = true;
+                if (startMinimizedToTray)
+                {
+                    Hide();
+                }
                 await RunUiTaskAsync(RefreshAllAsync);
                 if (!IsClosing) autoDetectTimer.Start();
             };
@@ -550,6 +565,25 @@ namespace Xm5ControlUi
                 Location = new Point(4, 43)
             };
             header.Controls.Add(statusLabel);
+
+            appSettingsButton = new GearButton(Color.FromArgb(44, 48, 54), Color.FromArgb(61, 67, 76), Color.FromArgb(78, 86, 96), ink)
+            {
+                Size = new Size(36, 36),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            appSettingsButton.Click += (s, e) => ConfigureAppSettings();
+            toolTip.SetToolTip(appSettingsButton, "App settings");
+            header.Controls.Add(appSettingsButton);
+
+            Action layoutHeader = () =>
+            {
+                if (appSettingsButton != null && !appSettingsButton.IsDisposed)
+                {
+                    appSettingsButton.Location = new Point(header.Width - appSettingsButton.Width - 22, 16);
+                }
+            };
+            header.Resize += (s, e) => layoutHeader();
+            layoutHeader();
 
             var left = new TableLayoutPanel
             {
@@ -1160,6 +1194,7 @@ namespace Xm5ControlUi
         {
             var menu = new ContextMenuStrip();
             menu.Items.Add("Open window", null, (s, e) => ShowWindow());
+            menu.Items.Add("App settings...", null, (s, e) => ConfigureAppSettings());
             menu.Items.Add(new ToolStripSeparator());
             AddTrayAction(menu.Items, "Noise cancelling", SetAncAsync);
             AddTrayAction(menu.Items, "Ambient sound: 12", () => SetAmbientAsync(12));
@@ -1210,7 +1245,7 @@ namespace Xm5ControlUi
 
         private string AppTitle()
         {
-            return currentProfile.DisplayName + " Control";
+            return "Sony XM Control";
         }
 
         private string TrayTitle()
@@ -1254,10 +1289,134 @@ namespace Xm5ControlUi
             };
         }
 
+        private static string AppConfigDirectory()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SonyHeadphonesControl");
+        }
+
         private static string ShortcutConfigPath()
         {
-            string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SonyHeadphonesControl");
-            return Path.Combine(root, "shortcuts.txt");
+            return Path.Combine(AppConfigDirectory(), "shortcuts.txt");
+        }
+
+        private static string AppSettingsConfigPath()
+        {
+            return Path.Combine(AppConfigDirectory(), "app-settings.txt");
+        }
+
+        private static string StartupShortcutPath()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "Sony XM Control.lnk");
+        }
+
+        private void LoadAppPreferences()
+        {
+            startMinimizedToTray = false;
+            string path = AppSettingsConfigPath();
+            if (!File.Exists(path)) return;
+
+            try
+            {
+                string[] lines = File.ReadAllLines(path);
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string lineText = lines[i];
+                    if (string.IsNullOrWhiteSpace(lineText)) continue;
+                    int equals = lineText.IndexOf('=');
+                    if (equals <= 0) continue;
+                    string key = lineText.Substring(0, equals).Trim();
+                    string value = lineText.Substring(equals + 1).Trim();
+                    if (string.Equals(key, "StartMinimizedInTray", StringComparison.OrdinalIgnoreCase))
+                    {
+                        startMinimizedToTray = ParseBool(value);
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void SaveAppPreferences()
+        {
+            try
+            {
+                string path = AppSettingsConfigPath();
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllLines(path, new[]
+                {
+                    "StartMinimizedInTray=" + (startMinimizedToTray ? "true" : "false")
+                });
+            }
+            catch
+            {
+                SetStatus("Could not save app settings", red);
+            }
+        }
+
+        private static bool ParseBool(string value)
+        {
+            return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "on", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool IsStartAtBootEnabled()
+        {
+            return File.Exists(StartupShortcutPath());
+        }
+
+        private bool SetStartAtBoot(bool enabled)
+        {
+            try
+            {
+                string shortcutPath = StartupShortcutPath();
+                if (!enabled)
+                {
+                    if (File.Exists(shortcutPath)) File.Delete(shortcutPath);
+                    return true;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(shortcutPath));
+                object shell = null;
+                object shortcut = null;
+                try
+                {
+                    Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                    if (shellType == null) return false;
+                    shell = Activator.CreateInstance(shellType);
+                    shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { shortcutPath });
+                    Type shortcutType = shortcut.GetType();
+                    shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { Application.ExecutablePath });
+                    shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { AppDomain.CurrentDomain.BaseDirectory });
+                    shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "Sony XM Control" });
+                    shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { Application.ExecutablePath + ",0" });
+                    shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+                    return true;
+                }
+                finally
+                {
+                    ReleaseComObject(shortcut);
+                    ReleaseComObject(shell);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void ReleaseComObject(object value)
+        {
+            if (value == null) return;
+            try
+            {
+                if (Marshal.IsComObject(value)) Marshal.FinalReleaseComObject(value);
+            }
+            catch
+            {
+            }
         }
 
         private void LoadShortcutBindings()
@@ -1311,6 +1470,29 @@ namespace Xm5ControlUi
             catch
             {
                 SetStatus("Could not save shortcuts", red);
+            }
+        }
+
+        private void ConfigureAppSettings()
+        {
+            if (IsClosing) return;
+            if (!Visible || WindowState == FormWindowState.Minimized) ShowWindow();
+
+            bool startAtBoot = IsStartAtBootEnabled();
+            using (var dialog = new AppSettingsDialog(startAtBoot, startMinimizedToTray, page, card, cardSoft, line, ink, subdued, blue, bluePressed))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                if (!SetStartAtBoot(dialog.StartAtBoot))
+                {
+                    SetStatus("Could not update startup setting", red);
+                    MessageBox.Show("Windows did not allow the startup shortcut to be updated.", "App settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                startMinimizedToTray = dialog.StartMinimizedInTray;
+                SaveAppPreferences();
+                if (lastActionLabel != null && !lastActionLabel.IsDisposed) lastActionLabel.Text = "App settings saved";
+                SetStatus("App settings saved", subdued);
             }
         }
 
@@ -2434,6 +2616,7 @@ namespace Xm5ControlUi
         private void ShowWindow()
         {
             if (IsClosing) return;
+            ShowInTaskbar = true;
             Show();
             WindowState = FormWindowState.Normal;
             Activate();
@@ -2479,6 +2662,7 @@ namespace Xm5ControlUi
             if (!exiting && minimizeToTray && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
+                ShowInTaskbar = false;
                 Hide();
                 Notify("Quick controls are available in the tray.");
                 return;
@@ -2813,6 +2997,183 @@ namespace Xm5ControlUi
         public override string ToString()
         {
             return Text;
+        }
+    }
+
+    internal sealed class AppSettingsDialog : Form
+    {
+        private readonly Color page;
+        private readonly Color card;
+        private readonly Color line;
+        private readonly Color ink;
+        private readonly Color subdued;
+        private readonly Color blue;
+        private readonly Color bluePressed;
+        private readonly Color inactive;
+        private readonly Color inactivePressed;
+
+        private PillButton startAtBootOnButton;
+        private PillButton startAtBootOffButton;
+        private PillButton startMinimizedOnButton;
+        private PillButton startMinimizedOffButton;
+
+        public bool StartAtBoot { get; private set; }
+        public bool StartMinimizedInTray { get; private set; }
+
+        public AppSettingsDialog(bool startAtBoot, bool startMinimizedInTray, Color page, Color card, Color cardSoft, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
+        {
+            this.page = page;
+            this.card = card;
+            this.line = line;
+            this.ink = ink;
+            this.subdued = subdued;
+            this.blue = blue;
+            this.bluePressed = bluePressed;
+            inactive = Color.FromArgb(61, 67, 76);
+            inactivePressed = Color.FromArgb(50, 55, 63);
+            StartAtBoot = startAtBoot;
+            StartMinimizedInTray = startMinimizedInTray;
+
+            Text = "App settings";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ClientSize = new Size(520, 318);
+            BackColor = page;
+            ForeColor = ink;
+            Font = new Font("Segoe UI", 10f);
+            Build();
+        }
+
+        private void Build()
+        {
+            var title = new Label
+            {
+                Text = "App settings",
+                ForeColor = ink,
+                Font = new Font("Segoe UI Semibold", 17f),
+                AutoSize = true,
+                Location = new Point(24, 22)
+            };
+            Controls.Add(title);
+
+            var panel = new Panel
+            {
+                Location = new Point(24, 70),
+                Size = new Size(472, 158),
+                BackColor = card,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            Controls.Add(panel);
+
+            startAtBootOnButton = NewSettingButton("On");
+            startAtBootOffButton = NewSettingButton("Off");
+            AddSettingRow(panel, "Start at login", "Open Sony XM Control when you sign in.", 22, startAtBootOnButton, startAtBootOffButton);
+            startAtBootOnButton.Click += (s, e) => SetStartAtBoot(true);
+            startAtBootOffButton.Click += (s, e) => SetStartAtBoot(false);
+
+            var divider = new Panel
+            {
+                BackColor = line,
+                Location = new Point(20, 82),
+                Size = new Size(panel.Width - 40, 1),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            panel.Controls.Add(divider);
+
+            startMinimizedOnButton = NewSettingButton("On");
+            startMinimizedOffButton = NewSettingButton("Off");
+            AddSettingRow(panel, "Start minimized in tray", "Launch quietly and keep quick controls in the tray.", 104, startMinimizedOnButton, startMinimizedOffButton);
+            startMinimizedOnButton.Click += (s, e) => SetStartMinimizedInTray(true);
+            startMinimizedOffButton.Click += (s, e) => SetStartMinimizedInTray(false);
+
+            var save = new PillButton("Save", blue, bluePressed)
+            {
+                Size = new Size(96, 34),
+                Location = new Point(ClientSize.Width - 222, ClientSize.Height - 54),
+                Anchor = AnchorStyles.Right | AnchorStyles.Bottom
+            };
+            save.Click += (s, e) =>
+            {
+                DialogResult = DialogResult.OK;
+                Close();
+            };
+            Controls.Add(save);
+
+            var cancel = new PillButton("Cancel", inactive, inactivePressed)
+            {
+                Size = new Size(96, 34),
+                Location = new Point(ClientSize.Width - 116, ClientSize.Height - 54),
+                Anchor = AnchorStyles.Right | AnchorStyles.Bottom
+            };
+            cancel.Click += (s, e) =>
+            {
+                DialogResult = DialogResult.Cancel;
+                Close();
+            };
+            Controls.Add(cancel);
+
+            SetStartAtBoot(StartAtBoot);
+            SetStartMinimizedInTray(StartMinimizedInTray);
+        }
+
+        private PillButton NewSettingButton(string text)
+        {
+            return new PillButton(text, inactive, inactivePressed)
+            {
+                Size = new Size(74, 32)
+            };
+        }
+
+        private void AddSettingRow(Control parent, string caption, string description, int top, PillButton onButton, PillButton offButton)
+        {
+            var captionLabel = new Label
+            {
+                Text = caption,
+                ForeColor = ink,
+                Font = new Font("Segoe UI Semibold", 10f),
+                Location = new Point(20, top),
+                Size = new Size(260, 22),
+                AutoEllipsis = true
+            };
+            parent.Controls.Add(captionLabel);
+
+            var descriptionLabel = new Label
+            {
+                Text = description,
+                ForeColor = subdued,
+                Font = new Font("Segoe UI", 9.2f),
+                Location = new Point(20, top + 23),
+                Size = new Size(300, 22),
+                AutoEllipsis = true
+            };
+            parent.Controls.Add(descriptionLabel);
+
+            offButton.Location = new Point(parent.Width - 94, top + 9);
+            offButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            onButton.Location = new Point(offButton.Left - 84, top + 9);
+            onButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            parent.Controls.Add(onButton);
+            parent.Controls.Add(offButton);
+        }
+
+        private void SetStartAtBoot(bool enabled)
+        {
+            StartAtBoot = enabled;
+            SetPair(startAtBootOnButton, startAtBootOffButton, enabled);
+        }
+
+        private void SetStartMinimizedInTray(bool enabled)
+        {
+            StartMinimizedInTray = enabled;
+            SetPair(startMinimizedOnButton, startMinimizedOffButton, enabled);
+        }
+
+        private void SetPair(PillButton onButton, PillButton offButton, bool enabled)
+        {
+            if (onButton != null) onButton.SetPalette(enabled ? blue : inactive, enabled ? bluePressed : inactivePressed);
+            if (offButton != null) offButton.SetPalette(!enabled ? blue : inactive, !enabled ? bluePressed : inactivePressed);
         }
     }
 
@@ -3765,6 +4126,111 @@ namespace Xm5ControlUi
                 rectangle.CloseFigure();
                 return rectangle;
             }
+            int d = radius * 2;
+            var path = new GraphicsPath();
+            path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
+            path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
+            path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    internal sealed class GearButton : Button
+    {
+        private readonly Color normal;
+        private readonly Color hoverFill;
+        private readonly Color pressedFill;
+        private readonly Color ink;
+        private bool hover;
+        private bool down;
+
+        public GearButton(Color normal, Color hoverFill, Color pressedFill, Color ink)
+        {
+            this.normal = normal;
+            this.hoverFill = hoverFill;
+            this.pressedFill = pressedFill;
+            this.ink = ink;
+            FlatStyle = FlatStyle.Flat;
+            BackColor = Color.Transparent;
+            FlatAppearance.BorderSize = 0;
+            FlatAppearance.MouseDownBackColor = Color.Transparent;
+            FlatAppearance.MouseOverBackColor = Color.Transparent;
+            Cursor = Cursors.Hand;
+            TabStop = false;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            hover = true;
+            Invalidate();
+            base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            hover = false;
+            down = false;
+            Invalidate();
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs mevent)
+        {
+            if (mevent.Button == MouseButtons.Left)
+            {
+                down = true;
+                Invalidate();
+            }
+            base.OnMouseDown(mevent);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs mevent)
+        {
+            down = false;
+            Invalidate();
+            base.OnMouseUp(mevent);
+        }
+
+        protected override void OnPaint(PaintEventArgs pevent)
+        {
+            pevent.Graphics.Clear(Parent != null ? Parent.BackColor : Color.Transparent);
+            pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color fill = down ? pressedFill : (hover ? hoverFill : normal);
+            Rectangle bounds = new Rectangle(1, 1, Width - 3, Height - 3);
+            using (var path = RoundedPath(bounds, 8))
+            using (var brush = new SolidBrush(fill))
+            {
+                pevent.Graphics.FillPath(brush, path);
+            }
+
+            DrawGear(pevent.Graphics, new PointF(Width / 2f, Height / 2f), Math.Max(6, Math.Min(Width, Height) / 4f), ink);
+        }
+
+        private static void DrawGear(Graphics graphics, PointF center, float radius, Color color)
+        {
+            using (var pen = new Pen(color, 1.8f))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                for (int i = 0; i < 8; i++)
+                {
+                    double angle = (Math.PI * 2 * i) / 8.0;
+                    float x1 = center.X + (float)Math.Cos(angle) * (radius + 2);
+                    float y1 = center.Y + (float)Math.Sin(angle) * (radius + 2);
+                    float x2 = center.X + (float)Math.Cos(angle) * (radius + 5);
+                    float y2 = center.Y + (float)Math.Sin(angle) * (radius + 5);
+                    graphics.DrawLine(pen, x1, y1, x2, y2);
+                }
+                graphics.DrawEllipse(pen, center.X - radius, center.Y - radius, radius * 2, radius * 2);
+                graphics.DrawEllipse(pen, center.X - 3, center.Y - 3, 6, 6);
+            }
+        }
+
+        private static GraphicsPath RoundedPath(Rectangle bounds, int radius)
+        {
             int d = radius * 2;
             var path = new GraphicsPath();
             path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
