@@ -2237,10 +2237,11 @@ namespace Xm5ControlUi
             using (var bandPen = new Pen(blue, 3f))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.FillEllipse(bgBrush, 0, 0, 31, 31);
-                g.DrawArc(bandPen, 8, 6, 16, 18, 205, 130);
-                FillRound(g, earBrush, new Rectangle(7, 15, 7, 10), 3);
-                FillRound(g, earBrush, new Rectangle(18, 15, 7, 10), 3);
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.FillEllipse(bgBrush, 1, 1, 30, 30);
+                g.DrawArc(bandPen, 7.5f, 7f, 17f, 16f, 205, 130);
+                FillRound(g, earBrush, new Rectangle(7, 16, 8, 10), 4);
+                FillRound(g, earBrush, new Rectangle(17, 16, 8, 10), 4);
             }
             IntPtr handle = bitmap.GetHicon();
             Icon icon = (Icon)Icon.FromHandle(handle).Clone();
