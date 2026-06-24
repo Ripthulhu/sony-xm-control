@@ -724,16 +724,21 @@ namespace Xm5ControlUi
 
             Action layoutAmbientControls = () =>
             {
+                int sliderHeight = 34;
+                int sliderVisibleBottom = sliderHeight / 2 + 12;
+                int sliderTop = Math.Max(212, parent.Height - 22 - sliderVisibleBottom);
+                int inputTop = sliderTop - 36;
+                int labelTop = inputTop - 22;
                 int right = parent.Width - CardInset;
-                levelLabel.Location = new Point(right - levelLabel.Width, 166);
-                apply.Location = new Point(right - apply.Width, 188);
+                levelLabel.Location = new Point(right - levelLabel.Width, labelTop);
+                apply.Location = new Point(right - apply.Width, inputTop);
 
                 int dropdownRight = apply.Left - 18;
-                ambientKindBox.Location = new Point(CardInset, 188);
+                ambientKindBox.Location = new Point(CardInset, inputTop);
                 ambientKindBox.Width = Math.Max(150, Math.Min(220, dropdownRight - CardInset));
 
-                levelSlider.Location = new Point(CardInset - 12, 224);
-                levelSlider.Size = new Size(Math.Max(220, parent.Width - (CardInset * 2) + 24), 38);
+                levelSlider.Location = new Point(CardInset - 12, sliderTop);
+                levelSlider.Size = new Size(Math.Max(220, parent.Width - (CardInset * 2) + 24), sliderHeight);
             };
             parent.Resize += (s, e) => layoutAmbientControls();
             layoutAmbientControls();
