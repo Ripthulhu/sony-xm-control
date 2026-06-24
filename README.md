@@ -2,6 +2,8 @@
 
 Unofficial Windows controller for Sony 1000X headphones and earbuds.
 
+![Sony XM Control screenshot](docs/screenshot.png)
+
 ## Supported Devices
 
 - WH-1000XM5

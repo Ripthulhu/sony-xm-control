@@ -46,6 +46,7 @@ New-Item -ItemType Directory -Force (Join-Path $packageRoot "c"), (Join-Path $pa
 Copy-Item -LiteralPath (Join-Path $root "src\c\xm5ctl.exe") -Destination (Join-Path $packageRoot "c\xm5ctl.exe") -Force
 Copy-Item -LiteralPath (Join-Path $root "src\ui\xm5ui.exe") -Destination (Join-Path $packageRoot "ui\xm5ui.exe") -Force
 Copy-Item -LiteralPath (Join-Path $root "src\ui\assets") -Destination (Join-Path $packageRoot "ui\assets") -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $root "docs") -Destination (Join-Path $packageRoot "docs") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination (Join-Path $packageRoot "README.md") -Force
 
 Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -Force
