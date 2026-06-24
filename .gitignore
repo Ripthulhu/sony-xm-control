@@ -1,0 +1,23 @@
+# Build output
+*.exe
+*.obj
+*.pdb
+*.log
+artifacts/
+dist/
+
+# Local investigation and handoff files
+current_handoff/
+handoff/
+reverse/
+*.zip
+
+# Older PowerShell prototype files kept locally
+src/*.ps1
+tools/
+sony-xm5.cmd
+sony-xm5.ps1
+
+# Local agent/editor state
+.agents/
+.codex/
